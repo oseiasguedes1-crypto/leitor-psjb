@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>Leitor PSJB</title>
+<script src="https://unpkg.com/@zxing/library@0.20.0/umd/index.min.js"></script>
+<style>
+  html,body{margin:0;height:100%;background:#000;color:#fff;font:16px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;overflow:hidden}
+  #v{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;background:#000}
+  .mira{position:fixed;left:6%;right:6%;top:50%;height:150px;transform:translateY(-50%);border:3px solid #22c55e;border-radius:14px;box-shadow:0 0 0 9999px rgba(0,0,0,.45)}
+  .mira:after{content:"";position:absolute;left:8px;right:8px;top:50%;height:2px;background:#ef4444;opacity:.85}
+  .topo{position:fixed;top:0;left:0;right:0;padding:calc(12px + env(safe-area-inset-top)) 16px 12px;background:rgba(0,0,0,.55);font-weight:650;text-align:center}
+  .base{position:fixed;left:0;right:0;bottom:0;padding:12px 16px calc(16px + env(safe-area-inset-bottom));display:flex;gap:10px;background:rgba(0,0,0,.55)}
+  button{flex:1;border:0;border-radius:12px;padding:15px;font-size:16px;font-weight:650;background:#fff;color:#111}
+  button.sec{background:rgba(255,255,255,.16);color:#fff}
+  #msg{position:fixed;left:16px;right:16px;top:calc(50% + 95px);text-align:center;font-size:15px;text-shadow:0 1px 3px #000}
+  #ok{position:fixed;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;gap:14px;background:#0b6b45;padding:24px;text-align:center}
+  #ok b{font-size:30px;letter-spacing:.04em;word-break:break-all}
+  .hidden{display:none!important}
+</style>
+</head>
+<body>
+<video id="v" playsinline muted autoplay></video>
+<div class="mira"></div>
+<div class="topo">Aponte para o código de barras</div>
+<div id="msg">Abrindo a câmera...</div>
+<div class="base"><button class="sec hidden" id="luz">Lanterna</button><button id="sair">Cancelar</button></div>
+<div id="ok"><div>Código lido</div><b id="cod"></b><div id="okMsg"></div><button id="okBtn" style="flex:none;width:100%;max-width:320px">Voltar ao app</button></div>
+<script>
+(function(){
+  var v=document.getElementById('v'),msg=function(t){document.getElementById('msg').textContent=t};
+  var stream=null,timer=null,ocupado=false,fim=false,det=null,zx=null,luz=false;
+  var FMT=['ean_13','ean_8','upc_a','upc_e','code_128','code_39','itf'];
+  var cv=document.createElement('canvas'),g=cv.getContext('2d',{willReadFrequently:true});
+
+  function parar(){if(timer){clearInterval(timer);timer=null}if(stream){stream.getTracks().forEach(function(t){t.stop()});stream=null}}
+  function voltar(){parar();try{window.close()}catch(e){}setTimeout(function(){history.length>1?history.back():null},300)}
+  document.getElementById('sair').onclick=function(){
+    try{if(window.opener)window.opener.postMessage({tipo:'psjb-ean-cancelado'},'*')}catch(e){}
+    voltar()};
+  document.getElementById('okBtn').onclick=voltar;
+
+  function entregar(code){
+    if(fim)return;fim=true;parar();
+    try{navigator.vibrate&&navigator.vibrate(80)}catch(e){}
+    document.getElementById('cod').textContent=code;
+    document.getElementById('ok').style.display='flex';
+    var enviado=false;
+    try{if(window.opener){window.opener.postMessage({tipo:'psjb-ean',code:code},'*');enviado=true}}catch(e){}
+    document.getElementById('okMsg').textContent=enviado?'Voltando ao app...':'Não consegui devolver o código ao app. Volte ao app e digite o número na busca.';
+    if(enviado)setTimeout(voltar,500);
+  }
+
+  function lerZX(){
+    if(typeof ZXing==='undefined')return null;
+    if(!zx){var B=ZXing.BarcodeFormat,h=new Map();h.set(ZXing.DecodeHintType.TRY_HARDER,true);
+      h.set(ZXing.DecodeHintType.POSSIBLE_FORMATS,[B.EAN_13,B.EAN_8,B.UPC_A,B.UPC_E,B.CODE_128,B.CODE_39,B.ITF]);
+      zx=new ZXing.MultiFormatReader();zx.setHints(h)}
+    var vw=v.videoWidth,vh=v.videoHeight;if(!vw)return null;
+    // faixa central (onde fica a mira), reduzida para no máximo 1000 px de largura
+    var sy=Math.round(vh*0.3),sh=Math.round(vh*0.4),esc=Math.min(1,1000/vw);
+    cv.width=Math.round(vw*esc);cv.height=Math.round(sh*esc);
+    g.drawImage(v,0,sy,vw,sh,0,0,cv.width,cv.height);
+    var src=new ZXing.HTMLCanvasElementLuminanceSource(cv);
+    try{return zx.decode(new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(src))).getText()}catch(e){}
+    try{return zx.decode(new ZXing.BinaryBitmap(new ZXing.GlobalHistogramBinarizer(src))).getText()}catch(e){}
+    return null;
+  }
+
+  async function ciclo(){
+    if(ocupado||fim||v.readyState<2)return;ocupado=true;
+    try{
+      var t=null;
+      if(det){var r=await det.detect(v);if(r&&r.length)t=r[0].rawValue}
+      else t=lerZX();
+      if(t)entregar(String(t).trim());
+    }catch(e){}
+    ocupado=false;
+  }
+
+  async function iniciar(){
+    try{if('BarcodeDetector' in window){var sup=await BarcodeDetector.getSupportedFormats();var f=FMT.filter(function(x){return sup.indexOf(x)>=0});if(f.length)det=new BarcodeDetector({formats:f})}}catch(e){det=null}
+    if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){msg('Este navegador não libera a câmera. Volte ao app e use "Tirar foto do código".');return}
+    try{
+      stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1080}}});
+    }catch(e){
+      msg(e&&e.name==='NotAllowedError'?'A câmera foi bloqueada. Libere a câmera para este site nas configurações do navegador e tente de novo.':'Não consegui abrir a câmera. Volte ao app e use "Tirar foto do código".');return}
+    v.srcObject=stream;try{await v.play()}catch(e){}
+    var tr=stream.getVideoTracks()[0],cap={};try{cap=tr.getCapabilities?tr.getCapabilities():{}}catch(e){}
+    try{if(cap.focusMode&&cap.focusMode.indexOf('continuous')>=0)tr.applyConstraints({advanced:[{focusMode:'continuous'}]})}catch(e){}
+    if(cap.torch){var b=document.getElementById('luz');b.classList.remove('hidden');
+      b.onclick=function(){luz=!luz;tr.applyConstraints({advanced:[{torch:luz}]}).catch(function(){});b.textContent=luz?'Apagar luz':'Lanterna'}}
+    msg('Encaixe o código na faixa verde, a uns 15 cm.');
+    timer=setInterval(ciclo,det?120:200);
+  }
+  iniciar();
+})();
+</script>
+</body>
+</html>
